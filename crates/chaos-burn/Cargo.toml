@@ -1,0 +1,8 @@
+[package]
+name = "chaos-burn"
+version.workspace = true
+edition.workspace = true
+description = "Volatile memory wiping with a single audited unsafe"
+
+[lints.rust]
+unsafe_code = "deny"

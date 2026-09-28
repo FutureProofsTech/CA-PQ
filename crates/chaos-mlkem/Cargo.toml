@@ -1,0 +1,13 @@
+[package]
+name = "chaos-mlkem"
+version.workspace = true
+edition.workspace = true
+description = "ML-KEM-768 shape KEM from zero, plain arithmetic (CA-PQ)"
+
+[dependencies]
+chaos-core = { path = "../chaos-core", version = "2.0.0" }
+chaos-hash = { path = "../chaos-hash", version = "2.0.0" }
+chaos-simd = { path = "../chaos-simd", version = "2.0.0" }
+
+[lints.rust]
+unsafe_code = "forbid"

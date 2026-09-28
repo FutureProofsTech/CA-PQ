@@ -1,0 +1,12 @@
+[package]
+name = "chaos-hash"
+version.workspace = true
+edition.workspace = true
+description = "Hand-written BLAKE3 and Keccak sponge, zero dependencies (CA-PQ)"
+
+[dependencies]
+chaos-core = { path = "../chaos-core", version = "2.0.0" }
+chaos-simd = { path = "../chaos-simd", version = "2.0.0" }
+
+[lints.rust]
+unsafe_code = "forbid"

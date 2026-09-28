@@ -1,0 +1,307 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[a4paper,margin=2.6cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage[dvipsnames,table]{xcolor}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+
+\hypersetup{colorlinks=true,linkcolor=blue!60!black,citecolor=blue!60!black,urlcolor=blue!60!black}
+\setlength{\parskip}{0.45em}
+\setlength{\parindent}{0em}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textsc{CA-PQ Whitepaper}}
+\fancyhead[R]{\small v2.0.0}
+\fancyfoot[C]{\small\thepage}
+
+\title{\textbf{CA-PQ Whitepaper}\\\large A Hybrid Post-Quantum KEM Framework Built From Zero}
+\author{CA-PQ Project}
+\date{27 September 2026 \\ \small Companion to the Yellow Paper (formal specification) and the Red-Team Report}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+\begin{abstract}
+CA-PQ is a post-quantum cryptography framework that refuses the usual trade-offs.
+Instead of choosing between battle-tested classical ECDH and larger post-quantum KEMs,
+it combines both---plus a deterministic chaotic-stream layer---under a single transcript,
+in a single dependency-free Rust tree where every primitive is hand-written and every
+claim is tested. Two PQ profiles (ML-KEM-768 at NIST level~3, ML-KEM-512 at level~1)
+feed two hybrid combiners alongside a hand-written X25519 leg. The result, on commodity
+hardware: $\sim$17k PQ encapsulations per second, $\sim$2.7k hybrid pairs per second,
+828--1\,148-byte ciphertexts, zero third-party code, and a red-team file documenting
+exactly what was attacked, what broke, and what remains open.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%-----------------------------------------------------------------------
+\section{The problem}
+%-----------------------------------------------------------------------
+
+Three forces collide in real-world cryptography migration:
+
+\begin{enumerate}[leftmargin=2em]
+\item \textbf{Quantum horizon.} X25519/ECDH falls to a cryptographically relevant quantum
+computer. Lattice KEMs (ML-KEM/FIPS~203) are the standardized answer, but migration takes
+years and ``pure PQ'' deployments lose the classical track record.
+\item \textbf{Hybrid demand.} The conservative answer---combine classical and PQ so the
+session holds if \emph{either} holds---is now best practice in TLS experimentation. But
+hybrids double implementation surface and dependency load.
+\item \textbf{Supply-chain reality.} Each dependency is trusted code. PQC libraries pull in
+big-integer crates, RNGs, vendor SIMD intrinsics, and build scripts. Auditing the union is
+impractical for small teams.
+\end{enumerate}
+
+CA-PQ's answer: a hybrid framework with \textbf{zero dependencies}, \textbf{deterministic
+APIs} (no RNG to subvert), and \textbf{tested honesty} (every security claim paired with
+the test that would falsify it).
+
+%-----------------------------------------------------------------------
+\section{Design principles}
+%-----------------------------------------------------------------------
+
+\begin{description}[leftmargin=2em,style=nextline]
+\item[Hybrid by construction, not by glue.]
+The combiner is a first-class primitive
+($\mathit{ss} = \mathrm{Hash}(\mathit{ss}_x \Vert \mathit{ss}_{pq} \Vert \mathrm{transcript})$),
+not two KEMs taped together. Per-leg failure semantics are specified and tested
+(X fails closed, PQ implicitly rejects).
+\item[Zero dependencies, verifiably.]
+\texttt{Cargo.lock} contains only \texttt{chaos-*} crates. Hash, sponge, curve, lattice
+math, and wiping are hand-written from public specifications.
+\item[Determinism as a security feature.]
+\texttt{keygen(seed)}, \texttt{encaps(pk, coins, nonce)}---all randomness is
+caller-supplied. No RNG means no RNG failures, no hidden state, and byte-exact test
+vectors for every operation.
+\item[No floats in the key path.]
+The chaotic engine runs in Q32.32 fixed point: cross-platform bit-identical, no FPU
+timing or rounding variance.
+\item[Performance without compromise of auditability.]
+Every optimization (AVX2/NEON/SSE2 tiers, Barrett reductions, batch APIs) is gated
+behind differential tests plus full-length KATs, and every ``clever'' change that
+measured $\sim$0 was reverted on record.
+\item[Honesty as architecture.]
+The threat model lists non-claims with the same care as claims. The red-team file
+records defects found, including the methodology traps that produced them.
+\end{description}
+
+%-----------------------------------------------------------------------
+\section{Architecture}
+%-----------------------------------------------------------------------
+
+\begin{center}
+\begin{tabular}{c}
+\texttt{seed32} $\longrightarrow$ \fbox{HYBRID keygen / encaps / decaps} $\longrightarrow$ \texttt{(hct, ss32)} \\
+\hspace{2em}$\swarrow$\hspace{6em}$\downarrow$\hspace{6em}$\searrow$ \\
+\fbox{X25519 KEM + chaos tail} \hspace{1em} \fbox{ML-KEM 512/768} \hspace{1em} \fbox{transcript + combiner} \\
+\hspace{1em}{\small ECDH (classical)} \hspace{3em} {\small lattice (PQ cover)} \\
+\end{tabular}
+\end{center}
+
+\paragraph{X leg} (\texttt{chaos-kem}, sysid \texttt{PQ04}).
+Hand-written X25519 ECDH ($5 \times 51$-bit limbs, Montgomery ladder, addition-chain
+inverse) wrapped with a chaotic-stream tail:
+$\mathrm{tail} = \mathrm{keystream}(\mathrm{expand}(\mathrm{XOF}(\mathrm{shared} \Vert
+\mathrm{transcript})))$,
+$\mathit{ss}_x = \mathrm{Hash}(\mathrm{tail} \Vert \mathrm{shared} \Vert \mathrm{tr})$.
+Contributory zero-checks on both sides.
+
+\paragraph{PQ leg} (\texttt{chaos-mlkem}).
+ML-KEM-768 and ML-KEM-512 from one generic core---NTT with compile-time twiddle tables,
+SHAKE-based sampling, CBD noise, Fujisaki--Okamoto transform with implicit rejection,
+batched matrix sampling, batch encaps API.
+
+\paragraph{Combiner} (\texttt{chaos-hybrid}, sysids \texttt{PQH2}/\texttt{PQH1}).
+Subseed derivation, joint transcript $\mathrm{commit} \Vert \mathit{ct}_x \Vert
+\mathit{ct}_{pq} \Vert \mathrm{nonce}$,
+$\mathit{ss} = \mathrm{Hash}(\mathit{ss}_x \Vert \mathit{ss}_{pq} \Vert \mathrm{tr})$.
+Secure if either leg holds.
+
+\paragraph{DEM} (\texttt{chaos-aead}).
+XOR stream + 16-byte keyed MAC, heapless API, constant-time verify.
+
+%-----------------------------------------------------------------------
+\section{The chaotic layer: what it is and is not}
+%-----------------------------------------------------------------------
+
+The engine integrates a damped 4D quadratic flow (Lorenz-28 regime:
+$a=10$, $b=8/3$, $c=-1$, $d=28$) in Q32.32 fixed point with RK4 at $dt=0.001$,
+discarding $N_{\mathrm{TRANSIENT}}=1000$ steps and sampling every 10th step through
+a bit-folding extractor. Measured largest Lyapunov exponent $\approx 0.6$--$0.9$
+(positive: chaotic, single---\emph{chaotic, not hyperchaotic}, stated honestly after
+re-parameterization from a collapsed regime the tests caught).
+
+What it \textbf{is}: a fast local stream expander and KDF with 256-bit seeds, strong
+seed sensitivity (independent seeds: Hamming $0.500$ flat from 50 steps), and validated
+whiteness (NIST-style 8/8, \texttt{ent} $7.99999$, 200~KB soak).
+
+What it \textbf{is not}: asymmetry. Red-team gates prove the negative---raw drive is a
+slow predictable signal (lag-1 $r \approx 0.97$ at sync sampling) and every observer
+synchronizes to every receiver on the same drive. Drive is never published, never
+trusted. Worst case (\S\ref{sec:security}) reduces to the asymmetric roots.
+
+Known nuance: rare materials capture bit-exactly by step $\sim$2000+ (periodic-window
+dynamics). Production tails end at step 1640, related materials are unreachable (XOF),
+tails are unobservable (hashes only)---INFO-level, sensor-pinned, fully analyzed in
+the Red-Team Report.
+
+%-----------------------------------------------------------------------
+\section{Security analysis}
+\label{sec:security}
+%-----------------------------------------------------------------------
+
+\paragraph{Per-leg foundations.}
+X25519: RFC~7748 shape pinned to independent big-int goldens (clamping, masking,
+ladder constant, inversion chain, encoding). ML-KEM: FIPS-203 shape pinned to
+full-length KAT agreement with an independent transcription (both profiles; no
+interop claim). BLAKE3/SHAKE: official vectors + split-invariance + rate-boundary
+oracles.
+
+\paragraph{Combiner argument.}
+The transcript binds commit, both ciphertexts, and nonce; $\mathit{ss}$ binds both
+leg secrets plus transcript. Tampering X fails closed (\texttt{None}); tampering PQ
+yields unrelated $\mathit{ss}$ (implicit rejection, deterministic); wrong keys fail;
+zero peer points fail closed on every combiner (subgroup confinement: clamped scalars
+$\times$ torsion $= 0$, gated both sides---tested). Cross-profile confusion is
+impossible by type (distinct sizes) and separated by sysid + hash domains (verified
+by full-stack KATs in both profiles).
+
+\paragraph{KEM hygiene.}
+FO transform with constant-time select; re-encryption is unconditional (timing smoke:
+valid:tampered $\approx 1$:$0.93$---no early-exit oracle). KEM MAC is keyed, verified
+before use; AEAD verifies before decrypting (constant-time compare).
+
+\paragraph{Misuse model (documented, tested).}
+Nonce reuse degrades to stream-XOR properties (standard, not resisted). Caller RNG
+failures produce weak-but-functional keys (deterministic API contract). ML-KEM dk
+arrays need \texttt{burn\_dk} (plain arrays can't self-wipe; in-tree flows do).
+
+\paragraph{What is explicitly not claimed.}
+No chaos asymmetry; no NP-hardness/hidden-subgroup claims; 256-bit seeds targeting
+$\sim$128-bit classical security; not constant-time beyond branchless swaps and tag
+comparison (bit-level timing accepted, no secret-dependent exits/lengths---verified);
+no external audit (the ask of this paper's readers).
+
+%-----------------------------------------------------------------------
+\section{Performance}
+%-----------------------------------------------------------------------
+
+Measured on Intel i5-14400F via \texttt{ca-pq bench} (shared runner---expect
+$\pm$10--20\% run variance). Throughputs in operations per second unless noted.
+
+\begin{table}[h]
+\centering
+\caption{Portable build (default x86-64: SSE2 BLAKE3 tier, scalar Keccak/NTT).}
+\begin{tabular}{lr}
+\toprule
+Operation & Throughput \\
+\midrule
+BLAKE3 1 MiB & $\sim$1\,500 MiB/s \\
+BLAKE3-keyed 64 B & $\sim$11\,M ops/s \\
+SHAKE128 bulk & $\sim$260 MiB/s \\
+Keystream (chaotic) & $\sim$3.3 MiB/s \\
+X25519-KEM encaps / decaps & $\sim$7.4k / $\sim$11k \\
+ML-KEM-768 encaps / decaps & $\sim$14.4k / $\sim$14.1k \\
+ML-KEM-768 batch-8 (per element) & $\sim$18.3k \\
+ML-KEM-512 encaps & $\sim$21.7k \\
+Hybrid-768 pair & $\sim$2.6k pairs/s \\
+Hybrid-512 pair & $\sim$3.0k pairs/s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{AVX2 build (\texttt{RUSTFLAGS="-C target-feature=+avx2"}).}
+\begin{tabular}{lr}
+\toprule
+Operation & Throughput \\
+\midrule
+BLAKE3 1 MiB & $\sim$2\,000--2\,500 MiB/s \\
+ML-KEM-768 encaps / decaps & $\sim$17.1k / $\sim$18.7k \\
+ML-KEM-768 batch-8 (per element) & $\sim$21.6k \\
+ML-KEM-512 encaps & $\sim$25.4k \\
+Hybrid-768 pair & $\sim$2.7k pairs/s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Cumulative AVX2-vs-original-portable gains on the PQ path: encaps $+58\%$, decaps
+$+100\%$, pair $+54\%$. The X25519 leg is SIMD-untouched by design (identical both
+builds).
+
+\begin{table}[h]
+\centering
+\caption{Wire sizes in bytes (fixed by type).}
+\begin{tabular}{lrrrrr}
+\toprule
+Object & X-KEM & ML-KEM-768 & ML-KEM-512 & Hybrid-768 & Hybrid-512 \\
+\midrule
+Public key & 68 & 1\,184 & 800 & 1\,284 & 900 \\
+Secret key (stored) & 64 (32 seed) & 2\,400 & 1\,632 & 2\,464 (32 seed) & 1\,696 (32 seed) \\
+Ciphertext & 60 & 1\,088 & 768 & 1\,148 & 828 \\
+Shared secret & 32 & 32 & 32 & 32 & 32 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+AEAD tag: 16 bytes. Release CLI binary: $\sim$631~KiB portable / $\sim$683~KiB AVX2
+(LTO, stripped). Tree: $\sim$8\,200 lines of Rust, zero dependencies.
+
+%-----------------------------------------------------------------------
+\section{Positioning}
+%-----------------------------------------------------------------------
+
+CA-PQ does not compete with broad PQ libraries on breadth (one lattice family, two
+profiles) or with audited TLS stacks on deployment readiness. Its position:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lll}
+\toprule
+Dimension & CA-PQ & Typical PQ library \\
+\midrule
+Dependencies & 0 (verified in lockfile) & OS-scale trees \\
+PQ + classical & hybrid by construction & usually one or glued \\
+Deterministic API & yes (caller RNG) & usually OS RNG inside \\
+Float-free key path & yes (Q32.32) & rare \\
+External audit & \textbf{no (the ask)} & some \\
+KAT depth & full-length, multi-implementation & official vectors \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Within the tree, profiles trade size for speed honestly: 512 is $\sim$1.6$\times$
+faster with $\sim$30\% smaller wires at NIST level~1; 768 holds level~3; hybrids add
+$\sim$60/828--1\,148~B over the PQ leg for classical + stream robustness.
+
+%-----------------------------------------------------------------------
+\section{Limitations and roadmap}
+%-----------------------------------------------------------------------
+
+In order: \textbf{external audit} (the blocker for any production use),
+transient-margin maintenance, NEON/SSE2 Keccak--NTT completion detail (SSE2 NTT
+explicitly rejected with numbers; NEON done), Kani proofs, TestU01/DIEHARDER
+campaign. Non-goals: new primitives, protocol design beyond KEM+DEM,
+masking/countermeasure engineering (documented stance).
+
+%-----------------------------------------------------------------------
+\section{Documents}
+%-----------------------------------------------------------------------
+
+Yellow Paper (formal specification); Red-Team Report (audit R1--R6, A1--A4); Threat
+Model (claims, non-claims, gates); SPEC (frozen parameters, normative,
+code-adjacent); PLAN (build history v1--v23 with measurements); CHANGELOG
+(v2.0.0 current).
+
+\end{document}

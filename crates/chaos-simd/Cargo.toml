@@ -1,0 +1,8 @@
+[package]
+name = "chaos-simd"
+version.workspace = true
+edition.workspace = true
+description = "Vector kernels (AVX2/SSE2/NEON), portable fallback (CA-PQ)"
+
+[lints.rust]
+unsafe_code = "deny"

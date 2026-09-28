@@ -1,0 +1,293 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[a4paper,margin=2.6cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage[dvipsnames,table]{xcolor}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+
+\hypersetup{colorlinks=true,linkcolor=blue!60!black,citecolor=blue!60!black,urlcolor=blue!60!black}
+\setlength{\parskip}{0.45em}
+\setlength{\parindent}{0em}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textsc{CA-PQ Yellow Paper}}
+\fancyhead[R]{\small v2.0.0}
+\fancyfoot[C]{\small\thepage}
+
+\title{\textbf{CA-PQ Yellow Paper}\\\large Formal Specification}
+\author{CA-PQ Project}
+\date{27 September 2026 \\ \small Normative companion to code. Where this paper and code disagree, code governs and the paper is a bug---file it.}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+\begin{abstract}
+Notation: $\Vert$ is concatenation, bytes are little-endian unless stated,
+$H(c, \mathit{ctx})$ is keyed BLAKE3, $\mathrm{XOF}(\mathit{data}, \mathit{ctx}, n)$
+is keyed BLAKE3-XOF. All integers in key paths are exact (no floats anywhere).
+Test vectors live in-crate (\texttt{kat\_*} tests) and in the independent Python
+transcriptions kept outside the tree.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%-----------------------------------------------------------------------
+\section{Conventions and sizes}
+\label{sec:sizes}
+%-----------------------------------------------------------------------
+
+Security parameter: 256-bit seeds throughout; shared secrets 32 bytes. Wire
+integers have fixed sizes by type (no length prefixes on wire objects).
+Sysids (4 bytes, bound into commits): X-KEM \texttt{PQ04}, hybrid-768
+\texttt{PQH2}, hybrid-512 \texttt{PQH1}.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrrrr}
+\toprule
+Object & X-KEM & ML-KEM-768 & ML-KEM-512 & Hybrid-768 & Hybrid-512 \\
+\midrule
+Public key & 68 & 1\,184 & 800 & 1\,284 & 900 \\
+Secret key & 64 (32 seed) & 2\,400 & 1\,632 & 2\,464 (32 seed) & 1\,696 (32 seed) \\
+Ciphertext & 60 = 12+32+16 & 1\,088 & 768 & 1\,148 & 828 \\
+Shared secret & 32 & 32 & 32 & 32 & 32 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+AEAD tag: 16 bytes. KEM/hybrid nonce: 12 bytes.
+
+%-----------------------------------------------------------------------
+\section{Chaotic engine}
+\label{sec:core}
+%-----------------------------------------------------------------------
+
+Fixed-point Q32.32 ($\mathrm{FRAC} = 32$) in \texttt{i64}, \texttt{i128}
+intermediates. $DT_Q = 4294967$ (round$(0.001 \cdot 2^{32})$),
+$N_{\mathrm{TRANSIENT}} = 1000$, clamp bound $\mathrm{BOUND}_Q = 256 \cdot 2^{32}$,
+sampling $\mathrm{STRIDE} = 10$, extractor scale $2^{20}$.
+
+State $s = [x,y,z,w]$, params $p = [a,b,c,d]$, defaults $a=10$, $b=8/3$,
+$c=-1$, $d=28$ (Lorenz-28 regime).
+
+\textbf{Derivative} with $\mathrm{qmul}(u,v) = (u \cdot v) \gg 32$ (exact
+truncating):
+\begin{align*}
+dx &= a\cdot(y-x) + w/4 \\
+dy &= d\cdot x + c\cdot y - x\cdot z \\
+dz &= x\cdot y - b\cdot z \\
+dw &= y/8 - w/4 - x/16
+\end{align*}
+
+\textbf{RK4 step} (fixed $dt$): $k_1 = f(s)$, $k_2 = f(s + k_1\cdot dt/2)$,
+$k_3 = f(s + k_2\cdot dt/2)$, $k_4 = f(s + k_3\cdot dt)$,
+$s \mathrel{+}= \mathrm{qmul}(\mathrm{div6}(k_1 + 2k_2 + 2k_3 + k_4), dt)$
+where $\mathrm{div6}$ is bit-exact truncating $/6$ (Granlund--Montgomery,
+range-checked $|v| < 2^{50}$). All advances clamped to $\pm\mathrm{BOUND}_Q$.
+$\mathrm{iterate}(s,p,n)$ applies $n$ steps with $dt = DT_Q$.
+
+\textbf{Expansion} (\texttt{expand\_from\_bytes}, 64~B $\to$ state + params):
+bytes $[0..32] \to x_0 \in [-10,10]$ per coordinate via centered \texttt{u32},
+Q-shift, $\times 10$, fractional mixing from bytes $[32..36]$/$[48..52]$;
+params = defaults jittered $\pm 5\%$ from bytes $[36..40]$
+($\mathrm{delta} = p\cdot j/2560$, $j \in [-128,127]$).
+Bytes 16--31, 40--47, 52--63 are unused by the map (lossy, harmless).
+
+\textbf{Extraction}: with $u = x$ as \texttt{u64},
+$\mathrm{folded} = (u \oplus (u \gg 17) \oplus (u \gg 29) \oplus (u \gg 7))
+\& \mathtt{0xFF}$,
+$\mathrm{out} = \mathrm{folded} \oplus \mathrm{rotl}_3((u \gg 11)\,\&\,\mathtt{0xFF})
+\cdot \mathtt{0x9E}\ \mathrm{rotr}_2$.
+\texttt{keystream} emits $\mathrm{extract}(x_0) \oplus \mathrm{extract}(x_1) \oplus
+\mathrm{extract}(x_3)$ every STRIDE steps (transient assumed discarded by caller).
+
+\textbf{Health} (\texttt{health\_check}, validation-only): 1000-step boundedness +
+movement (drift $\ge 2^{-8}$) + 1024-step 1-LSB divergence ($\ge 8/128$ low-word
+diffs).
+
+%-----------------------------------------------------------------------
+\section{Hashing}
+\label{sec:hash}
+%-----------------------------------------------------------------------
+
+\textbf{BLAKE3}: standard IV, message permutation
+$[2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8]$, 7-round compress, tree mode
+($\mathrm{BLOCK\_LEN} = 64$, $\mathrm{CHUNK\_LEN} = 1024$,
+$\mathrm{MAX\_DEPTH} = 54$, chunk counter, \texttt{CHUNK\_START}/
+\texttt{CHUNK\_END}/\texttt{ROOT} flags). API: \texttt{Hasher::\{new, new\_keyed,
+update, finalize, finalize\_xof\}}, \texttt{blake3}, \texttt{blake3\_keyed},
+\texttt{derive\_key}, \texttt{Hash256::\{hash, xof, mac\}}.
+
+\textbf{Keccak sponge} (FIPS~202): compile-time LFSR round constants,
+$\rho/\pi/\chi/\iota$ reference layout, pad10*1, suffixes \texttt{0x06} (SHA3) /
+\texttt{0x1F} (SHAKE). Rates: SHA3-256/SHAKE256 136, SHA3-512 72, SHAKE128 168.
+API: one-shot \texttt{sha3\_256/512}, \texttt{shake128/256}; incremental and
+streaming readers; 4-way batch squeezes.
+
+\textbf{SIMD} (\texttt{chaos-simd}, compile-time dispatch, no runtime detection):
+BLAKE3 compress 8-way AVX2 / 4-way SSE2 / 4-way NEON; Keccak-f 4-way AVX2 / 2-way
+SSE2 / 2-way NEON; NTT 8-way AVX2 / 4-wide NEON (+ portable everywhere). Hasher
+groups narrow $8 \to 4$ chunks on SSE2/NEON tiers with identical tree semantics.
+
+%-----------------------------------------------------------------------
+\section{X25519}
+\label{sec:x25519}
+%-----------------------------------------------------------------------
+
+Field $GF(2^{255}-19)$ in $5 \times 51$-bit signed \texttt{i64} limbs,
+\texttt{i128} products; full + light carry with 19-fold; schoolbook multiply.
+Montgomery ladder (255 steps, branchless cswap), $A24 = 121665$, inversion
+$z^{2^{255}-21}$ by fixed chain, full encode/decode with commit reduction.
+Scalar clamping (\texttt{\&248}, \texttt{\&127}, \texttt{|64}), point masking
+(\texttt{\&0x7f}), all-zero contributory check.
+
+%-----------------------------------------------------------------------
+\section{X-KEM}
+\label{sec:kem}
+%-----------------------------------------------------------------------
+
+Sysid \texttt{PQ04}.
+\begin{description}[leftmargin=2em,style=nextline]
+\item[\texttt{keygen(seed32)}]
+$x_{\mathrm{sec}} = \mathrm{XOF}(\mathrm{seed}, \text{\texttt{ca-pq-sk-x-v1}})$,
+$\mathrm{chaos\_seed} = \mathrm{XOF}(\mathrm{seed}, \text{\texttt{ca-pq-sk-chaos-v1}})$,
+$x_{pk} = \mathrm{scalarmult}(x_{\mathrm{sec}}, G)$,
+$\mathrm{mat} = \mathrm{XOF}(\mathrm{chaos\_seed}, \text{\texttt{ca-pq-kdf-v1}})$,
+$\mathrm{commit} = H(\text{\texttt{PQ04}} \Vert \mathrm{mat} \Vert x_{pk},
+\text{\texttt{ca-pq-pk-v1}})$.
+\item[\texttt{encaps(pk, eph\_seed32, nonce12)}]
+$eph_x = \mathrm{XOF}(\mathrm{eph\_seed}, \text{\texttt{ca-pq-eph-x-v1}})$,
+$eph_{pk}$, $\mathrm{shared} = \mathrm{DH}(eph_x, pk.x_{pk})$ (\texttt{None} if
+zero), $tr = \mathrm{commit} \Vert x_{pk} \Vert eph_{pk} \Vert \mathrm{nonce}$,
+$tr_{\mathrm{hash}} = H(tr, \text{\texttt{ca-pq-tr-v1}})$,
+$mac_{key} = H(\mathrm{shared}, \text{\texttt{ca-pq-mac-v1}})$,
+$tag = \mathrm{MAC}(mac_{key}, tr, \text{\texttt{ca-pq-ct-v1}})[..16]$,
+$tail = \mathrm{keystream}(\mathrm{expand}(\mathrm{XOF}(\mathrm{shared} \Vert
+tr_{\mathrm{hash}}, \text{\texttt{ca-pq-chaos-v1}})), \text{transient }1000, 64B)$,
+$\mathit{ss} = H(\mathrm{tail} \Vert \mathrm{shared} \Vert tr_{\mathrm{hash}},
+\text{\texttt{ca-pq-sync-v1}})$. Ciphertext $=$ nonce $\Vert$ eph\_pk $\Vert$ tag.
+\item[\texttt{decaps(sk, pk, ct)}]
+Recompute shared (\texttt{None} if zero), verify tag (abort $\to$ \texttt{None}),
+recompute tail + ss identically.
+\end{description}
+
+%-----------------------------------------------------------------------
+\section{ML-KEM}
+\label{sec:mlkem}
+%-----------------------------------------------------------------------
+
+Parameters: $n = 256$, $q = 3329$, $\mathrm{INV128} = 3303$; 768: $k = 3$,
+$\eta_1 = \eta_2 = 2$; 512: $k = 2$, $\eta_1 = 3$, $\eta_2 = 2$; both $d_u = 10$,
+$d_v = 4$. Generic core over $\mathrm{Profile}\ \{K, \mathrm{ETA1}, \mathrm{ETA2},
+\mathrm{EK\_LEN}, \mathrm{DK\_LEN}, \mathrm{CT\_LEN}\}$.
+
+\textbf{NTT}: 7 layers ($\mathrm{len}$ $128 \to 2$ fwd / $2 \to 128$ inv), twiddles
+$17^{\mathrm{brv7}(i)}$ ($\mathrm{brv7}$ = 7-bit reversal),
+$\mathrm{fwd\_idx}(\mathrm{len}, g) = 256/(2\cdot\mathrm{len}) + g$, pair moduli
+$\gamma[p] = 17^{\mathrm{brv7}(64+\lfloor p/2 \rfloor) + 128\cdot(p \bmod 2)}$,
+single final $\times 3303$ scale. Modular ops: branchless conditional add/sub on
+$[0,q)$, single-\% mulmod; entry accepts $[0,4096)$ (decode range) via one
+conditional subtract---scalar and vector paths agree bit-for-bit there.
+
+\textbf{Codec}: LSB-first \texttt{byte\_encode/decode};
+$\mathrm{compress}_d(x) = \mathrm{round}(2^d/q \cdot x) \bmod 2^d$ /
+$\mathrm{decompress}_d(y) = \mathrm{round}(q/2^d \cdot y)$ (exact integer half-up);
+$\mathrm{cbd}_\eta$ ($\eta = 2$: 128~B, $\eta = 3$: 192~B);
+$\mathrm{sample\_ntt}(\mathrm{seed}, i, j)$ = SHAKE128($\mathrm{seed} \Vert i \Vert j$)
+rejection sampling (3-byte parse, $d_1 = b_0 + 256\cdot(b_1 \bmod 16)$,
+$d_2 = b_1/16 + 16\cdot b_2$); $\mathrm{prf}_\eta$ = SHAKE256($s \Vert b$,
+$64\cdot\eta$~B).
+
+\textbf{Flows} (FIPS-203 shape): $\rho \Vert \sigma = \mathrm{SHA3\text{-}512}(d)$;
+matrix from $\rho$, noise from $\sigma$ (counters $0..2k{-}1$, $\eta_1$);
+\texttt{encaps}: coins $0..2k$ ($\eta_1$) + $e_2$ ($\eta_2$), FO
+$K = H(m \Vert H(ek))$, $\mathit{ss} = \mathrm{SHAKE256}(K \Vert H(ct))$;
+\texttt{decaps}: decrypt, re-encrypt, constant-time select vs.\
+$\mathrm{SHAKE256}(z \Vert H(ct))$ implicit rejection.
+\texttt{encaps\_batch}: shared matrix, element $i$ bit-identical to scalar
+encaps. Encode widths 12/10/4/1; \texttt{message\_poly} maps bits to $(q+1)/2$.
+
+%-----------------------------------------------------------------------
+\section{Hybrid combiners}
+\label{sec:hybrid}
+%-----------------------------------------------------------------------
+
+Both profiles: subseeds $H(\mathrm{seed}, \text{h-x} / \text{h-mlkem-d} /
+\text{h-mlkem-z})$ (768: \texttt{ca-pq-h-*}, 512: \texttt{ca-pq-h512-*});
+$\mathrm{commit} = H(xpk.\mathrm{commit} \Vert xpk.\mathrm{sysid} \Vert x_{pk}
+\Vert pq_{ek}, \text{h-pk})$; encaps derives $eph_x$, $m_{pq}$ from seed, runs
+both legs, $tr = H(\mathrm{commit} \Vert \mathit{ct}_x \Vert \mathit{ct}_{pq}
+\Vert \mathrm{nonce}, \text{h-tr})$,
+$\mathit{ss} = H(\mathit{ss}_x \Vert \mathit{ss}_{pq} \Vert tr, \text{h-ss})$.
+Decaps: X failure $\to$ \texttt{None}; PQ tamper $\to$ unrelated $\mathit{ss}$.
+Fixed sizes per \S\ref{sec:sizes}; sysids \texttt{PQH2}/\texttt{PQH1}.
+
+%-----------------------------------------------------------------------
+\section{AEAD}
+\label{sec:aead}
+%-----------------------------------------------------------------------
+
+Stream: keyed XOF over length-framed nonce (\texttt{ca-pq-dem-stream-v2}:
+domain $\Vert$ \texttt{0x00} $\Vert$ le64(len) $\Vert$ nonce---full nonce
+absorbed, no truncation). Tag: $\mathrm{MAC}(\mathit{ss},
+\text{\texttt{ca-pq-dem-v1}} \Vert \texttt{0x00} \Vert \mathrm{nonce} \Vert
+\mathit{ct})[..16]$, constant-time verify, verify-before-decrypt. v1 streams
+($\mathit{ss} \Vert \mathrm{nonce}[..24]$ zero-padded) are incompatible by design
+(collided distinct nonces).
+
+%-----------------------------------------------------------------------
+\section{Domain registry}
+\label{sec:domains}
+%-----------------------------------------------------------------------
+
+Each string is used for exactly one purpose (duplicates below are
+same-value-both-sides by construction):
+\begin{itemize}[leftmargin=2em]
+\item Key derivation/splitting: \texttt{ca-pq-sk-chaos-v1},
+\texttt{ca-pq-sk-x-v1}, \texttt{ca-pq-kdf-v1}, \texttt{ca-pq-h-x},
+\texttt{ca-pq-h-mlkem-d/z}, \texttt{ca-pq-h512-x/mlkem-d/mlkem-z},
+\texttt{ca-pq-h-eph-x/m}, \texttt{ca-pq-h512-eph-x/m}.
+\item Commits/transcripts/MACs: \texttt{ca-pq-pk-v1}, \texttt{ca-pq-tr-v1},
+\texttt{ca-pq-mac-v1}, \texttt{ca-pq-ct-v1}, \texttt{ca-pq-sync-v1},
+\texttt{ca-pq-chaos-v1}, \texttt{ca-pq-eph-x-v1}, \texttt{ca-pq-h-pk/tr/ss},
+\texttt{ca-pq-h512-pk/tr/ss}.
+\item DEM: \texttt{ca-pq-dem-stream-v2}, \texttt{ca-pq-dem-v1}.
+\item ML-KEM internals use raw SHA3/SHAKE (FIPS-assigned roles, no custom domains).
+\end{itemize}
+
+%-----------------------------------------------------------------------
+\section{KAT inventory}
+\label{sec:kats}
+%-----------------------------------------------------------------------
+
+BLAKE3 official vectors + split/multi-block XOF tests (\texttt{chaos-hash});
+SHA3/SHAKE oracle incl.\ rate boundaries; X25519 big-int goldens + field-layer
+goldens (\texttt{x25519::tests}); ML-KEM NTT/CBD/compress goldens + full
+\texttt{kat\_a}/\texttt{kat\_b} vs.\ independent transcriptions (both profiles) +
+roundtrip/tamper/batch suites; hybrid \texttt{kat\_hybrid\_a/b} +
+\texttt{kat\_h512\_a/b} vs.\ full-stack references; chaos \texttt{kat\_state} +
+health/avalanche gates; AEAD roundtrip/tamper/framing tests; attack-suite gates
+(\texttt{chaos-attack}).
+
+%-----------------------------------------------------------------------
+\section{Conformance notes}
+%-----------------------------------------------------------------------
+
+Implementations must reproduce: exact fixed-point/RK4/div6 semantics
+(\S\ref{sec:core}), NTT twiddle order and pair moduli (\S\ref{sec:mlkem}), FO
+domain flow, wire sizes (\S\ref{sec:sizes}), and domain strings
+(\S\ref{sec:domains}). Deviating in constant-time hardening is allowed only where
+outputs are unaffected. No interoperation with other libraries is claimed;
+agreement is defined against the in-tree KATs and the independent Python
+transcriptions.
+
+\end{document}

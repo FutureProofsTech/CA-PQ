@@ -1,0 +1,5 @@
+/target/
+/fuzz/target/
+*.swp
+.DS_Store
+fuzz-*.log

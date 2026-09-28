@@ -1,0 +1,14 @@
+[package]
+name = "chaos-hybrid"
+version.workspace = true
+edition.workspace = true
+description = "Flagship X25519 + ML-KEM-768 + chaos hybrid KEM (CA-PQ)"
+
+[dependencies]
+chaos-core = { path = "../chaos-core", version = "2.0.0" }
+chaos-hash = { path = "../chaos-hash", version = "2.0.0" }
+chaos-kem = { path = "../chaos-kem", version = "2.0.0" }
+chaos-mlkem = { path = "../chaos-mlkem", version = "2.0.0" }
+
+[lints.rust]
+unsafe_code = "forbid"

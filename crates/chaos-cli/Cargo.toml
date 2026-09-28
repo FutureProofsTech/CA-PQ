@@ -1,0 +1,22 @@
+[package]
+name = "chaos-cli"
+version.workspace = true
+edition.workspace = true
+description = "CA-PQ command-line tool: KAT, demo, attack, bench, pq, hybrid"
+
+[[bin]]
+name = "ca-pq"
+path = "src/main.rs"
+
+[dependencies]
+chaos-core = { path = "../chaos-core", version = "2.0.0" }
+chaos-hash = { path = "../chaos-hash", version = "2.0.0" }
+chaos-extract = { path = "../chaos-extract", version = "2.0.0" }
+chaos-kem = { path = "../chaos-kem", version = "2.0.0" }
+chaos-aead = { path = "../chaos-aead", version = "2.0.0" }
+chaos-attack = { path = "../chaos-attack", version = "2.0.0" }
+chaos-hybrid = { path = "../chaos-hybrid", version = "2.0.0" }
+chaos-mlkem = { path = "../chaos-mlkem", version = "2.0.0" }
+
+[lints.rust]
+unsafe_code = "forbid"

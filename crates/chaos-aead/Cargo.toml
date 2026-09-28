@@ -1,0 +1,12 @@
+[package]
+name = "chaos-aead"
+version.workspace = true
+edition.workspace = true
+description = "Thin XOR-stream + MAC DEM with heapless API (CA-PQ)"
+
+[dependencies]
+chaos-core = { path = "../chaos-core", version = "2.0.0" }
+chaos-hash = { path = "../chaos-hash", version = "2.0.0" }
+
+[lints.rust]
+unsafe_code = "forbid"

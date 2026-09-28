@@ -1,0 +1,37 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo run -p chaos-cli -- kat
+      - run: cargo run -p chaos-cli -- attack
+      - run: cargo run -p chaos-cli -- pq
+      - run: cargo run -p chaos-cli -- hybrid
+  simd:
+    # Validates the AVX2 kernel + batched group path (GH runners have AVX2).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: RUSTFLAGS="-C target-feature=+avx2" cargo test -p chaos-hash -p chaos-simd -p chaos-mlkem
+      - run: RUSTFLAGS="-C target-feature=+avx2" cargo clippy -p chaos-hash -p chaos-simd -p chaos-mlkem --all-targets -- -D warnings
+  cross:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf, wasm32-unknown-unknown, aarch64-unknown-linux-gnu
+      - run: cargo check -p chaos-burn -p chaos-core -p chaos-hash -p chaos-simd -p chaos-extract -p chaos-kem -p chaos-aead -p chaos-mlkem -p chaos-hybrid --target thumbv7em-none-eabihf
+      - run: cargo check --workspace --target wasm32-unknown-unknown
+      - run: cargo check -p chaos-hash -p chaos-simd --target aarch64-unknown-linux-gnu

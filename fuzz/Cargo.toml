@@ -1,0 +1,50 @@
+[package]
+name = "ca-pq-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.chaos-core]
+path = "../crates/chaos-core"
+[dependencies.chaos-hash]
+path = "../crates/chaos-hash"
+[dependencies.chaos-mlkem]
+path = "../crates/chaos-mlkem"
+[dependencies.chaos-kem]
+path = "../crates/chaos-kem"
+
+[[bin]]
+name = "hash_split"
+path = "fuzz_targets/hash_split.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shake_stream"
+path = "fuzz_targets/shake_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mlkem_roundtrip"
+path = "fuzz_targets/mlkem_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kem_roundtrip"
+path = "fuzz_targets/kem_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

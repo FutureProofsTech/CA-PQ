@@ -1,0 +1,30 @@
+[workspace]
+members = [
+  "crates/chaos-burn",
+  "crates/chaos-core",
+  "crates/chaos-hash",
+  "crates/chaos-simd",
+  "crates/chaos-extract",
+  "crates/chaos-kem",
+  "crates/chaos-hybrid",
+  "crates/chaos-mlkem",
+  "crates/chaos-aead",
+  "crates/chaos-attack",
+  "crates/chaos-stat",
+  "crates/chaos-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "2.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

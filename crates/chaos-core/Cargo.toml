@@ -1,0 +1,15 @@
+[package]
+name = "chaos-core"
+version.workspace = true
+edition.workspace = true
+description = "Deterministic fixed-point 4D chaotic flow engine (CA-PQ)"
+
+[features]
+default = []
+std = []
+
+[dependencies]
+chaos-burn = { path = "../chaos-burn", version = "2.0.0" }
+
+[lints.rust]
+unsafe_code = "forbid"
